@@ -12,9 +12,16 @@ version 3 as published by the Free Software Foundation
  */
 
 #include <SPI.h>
-#include <nRF24L01.h>
-#include <RF24.h>
-#include <RF24_config.h>
+#include "nRF24L01.h"
+#include "RF24.h"
+#include "RF24_config.h"
+#include "snes.h"
+#include "printf.h"
+#include "snes.h"
+#define strobe 2
+#define clock 3
+#define data1 5
+#define data2 6
 
 //
 // Hardware Configuration
@@ -27,14 +34,8 @@ RF24 radio(9,10);
 //
 
 volatile unsigned long state2 = 0xFFFFFFFF;
-volatile byte i = 0;
-const uint64_t pipes[2] = { 0xF0F0F0F0E1LL, 0xF0F0F0F0D2LL };
-volatile int strobe = 2;
-int clock = 3;
-volatile int data1 = 5;
-volatile int data2 = 6;
+volatile byte loopCount = 0;
 bool firstLoop = true;
-volatile int status2 = 1;
 
 void setup()
 {
@@ -43,6 +44,7 @@ void setup()
   radio.setRetries(0,15);
   radio.enableDynamicPayloads();
   Serial.begin(57600);
+  printf_begin();
   
   //setup SNES pins
   pinMode(strobe, INPUT);
@@ -51,8 +53,8 @@ void setup()
   pinMode(data2, OUTPUT); digitalWrite(data2, LOW);
 
   //open radio pipes
-  radio.openWritingPipe(pipes[1]);
-  radio.openReadingPipe(1,pipes[0]);
+  radio.openWritingPipe(PIPE2);
+  radio.openReadingPipe(1,PIPE1);
   
   //Dump the configuration of the RF unit for debugging - remove in final code
   radio.printDetails();
@@ -66,14 +68,11 @@ void setup()
 void loop()
 {
   //check if this is the first execution of loop()
-  if (firstLoop) {
-    int status1 = 1;
+  while (firstLoop) {
     
     //send ping packet to let transmitter know we are ready for a packet
-    bool ok = radio.write( &status1, sizeof(int));
-    
-    //begin listenting for button state packet
-    radio.startListening();
+    ping_t ping = PING_VALUE;
+    bool ok = radio.write( &ping, sizeof(ping_t) );
     
     //debug check to make sure ping packet was sent - remove in final code
     if (!ok) {
@@ -84,6 +83,9 @@ void loop()
            
       //let the program know we have successfully executed the first loop
       firstLoop = false;
+      
+      //begin listenting for button state packet
+      radio.startListening();
     }
   }
   
@@ -91,8 +93,8 @@ void loop()
   if ( radio.available() )
   {
     //read data packet from transmitter
-    unsigned long state = 0;
-    radio.read( &state, sizeof(unsigned long) );
+    buttons_t state = 0;
+    radio.read( &state, sizeof(buttons_t) );
     
     //debug output recieved packet contents - remove in final code
     Serial.println(state, BIN);
@@ -120,13 +122,11 @@ void latch()
     digitalWrite(data2,HIGH);
   }
   else {
-    
-    //set first bit on data lines
-    digitalWrite(data1,bitRead(state2,i));
-    digitalWrite(data2,bitRead(state2,(i+16)));
-    
+
     //initialize clock signal counter to 0
-    i = 0;
+    loopCount = 0;
+    
+    sendNextBits();
     
     //debug status output
     Serial.println("Bit0 out");
@@ -138,19 +138,17 @@ void latch()
 void data()
 {
   //increment clock signal counter
-  i++;
+  loopCount++;
   
-  //output next bit on data lines
-  digitalWrite(data1,bitRead(state2,i));
-  digitalWrite(data2,bitRead(state2,(i+16)));
+  sendNextBits();
   
   //debug status output
   Serial.print("Bit");
-  Serial.print(i);
+  Serial.print(loopCount);
   Serial.println(" out");
   
   //check to see if this is the final clock cycle in a read cycle
-  if(i=15)
+  if(15==loopCount)
   {
     //drive data lines low
     digitalWrite(data1,LOW);
@@ -159,21 +157,27 @@ void data()
     //take radio out of listening mode
     radio.stopListening();
     
-    //read ping bit into ISR local variable from volatile global
-    int status1 = status2;
-    
-    //send ping packet to transmitter
-    bool ok = radio.write( &status1, sizeof(int));
-    
-    //debug check to see if packet sent - remove in final code 
-    if (!ok) {
-      Serial.println("sync packet transmission failed");
+    //send ping packet to transmitter 
+    bool ok = false;
+    while (!ok) {
+      ping_t ping = PING_VALUE;
+      bool ok = radio.write( &ping, sizeof(ping_t) );
+      if (!ok) {
+        Serial.println("sync packet transmission failed");  //debug check to see if packet sent - remove in final code
+      }
     }
-    else {
-      Serial.println("sync packet transmission successful");
-    }
+    
+    Serial.println("sync packet transmission successful");
     
     //put radio back in listening mode
     radio.startListening();
   }
+}
+
+void sendNextBits()
+{
+  
+  //output next bit on data lines   
+  digitalWrite(data1,bitRead(state2,loopCount));
+  digitalWrite(data2,bitRead(state2,(loopCount+16)));
 }
